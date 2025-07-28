@@ -9,8 +9,8 @@ from langchain_community.utilities import SerpAPIWrapper
 _LOGGER = logging.getLogger(__name__)
 
 # Initialize SerpAPI wrapper
-serpapi = SerpAPIWrapper(serpapi_api_key=os.getenv("SERPAPI_API_KEY"))
-
+# serpapi = SerpAPIWrapper(serpapi_api_key=os.getenv("SERPAPI_API_KEY"))
+serpapi = SerpAPIWrapper(serpapi_api_key="bde9c9118c7b330ce89646e298dfb74b062aaea7a3a8376ed95cbdb0f2c56a7e")
 
 async def search_companies(query: str) -> str:
     """
