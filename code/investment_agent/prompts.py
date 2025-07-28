@@ -30,6 +30,8 @@ Focus on companies with:
 - Industry relevance and future prospects
 
 Return exactly 10 companies, prioritizing quality over quantity if fewer than 10 suitable companies are found.
+
+Return the companies as a list in the 'companies' field.
 """
 
 # Step 2: Portfolio Planning Prompt

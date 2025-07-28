@@ -32,6 +32,10 @@ class CompanyResearch(BaseModel):
     explanation: str
 
 
+class CompanyResearchList(BaseModel):
+    companies: list[CompanyResearch]
+
+
 class PortfolioAllocation(BaseModel):
     company_name: str
     allocation_percentage: float
@@ -65,7 +69,7 @@ async def step_1_research_companies(state: InvestmentAgentState, config: Runnabl
     search_results = await tools.search_companies(search_query)
     
     # Process results with LLM to extract structured company data
-    model = llm.with_structured_output(list[CompanyResearch])
+    model = llm.with_structured_output(CompanyResearchList)
     
     system_prompt = company_research_prompt.format(
         industry=state.industry or "technology",
@@ -78,14 +82,14 @@ async def step_1_research_companies(state: InvestmentAgentState, config: Runnabl
         messages = [{"role": "system", "content": system_prompt}]
         response = await model.ainvoke(messages, config)
         if response:
-            companies = cast(list[CompanyResearch], response)
+            company_list = cast(CompanyResearchList, response)
             research_results = [
                 {
                     "name": company.name,
                     "risk_factor": company.risk_factor,
                     "explanation": company.explanation,
                 }
-                for company in companies
+                for company in company_list.companies
             ]
             state.research_results = research_results
             return state
@@ -113,25 +117,77 @@ async def step_2_build_portfolio(state: InvestmentAgentState, config: RunnableCo
     )
     
     for count in range(_MAX_LLM_RETRIES):
-        messages = [{"role": "system", "content": system_prompt}]
-        response = await model.ainvoke(messages, config)
-        if response:
-            portfolio = cast(PortfolioPlan, response)
-            state.portfolio_plan = {
-                "companies": [
+        try:
+            messages = [{"role": "system", "content": system_prompt}]
+            response = await model.ainvoke(messages, config)
+            _LOGGER.info(f"Step 2 LLM response (attempt {count + 1}): {response}")
+            
+            if response and hasattr(response, 'companies') and len(response.companies) > 0:
+                portfolio = cast(PortfolioPlan, response)
+                state.portfolio_plan = {
+                    "companies": [
+                        {
+                            "company_name": company.company_name,
+                            "allocation_percentage": company.allocation_percentage,
+                            "holding_period": company.holding_period,
+                        }
+                        for company in portfolio.companies
+                    ],
+                    "total_allocation": portfolio.total_allocation,
+                }
+                _LOGGER.info(f"Step 2 portfolio plan created: {state.portfolio_plan}")
+                return state
+            elif response and hasattr(response, 'companies') and len(response.companies) == 0:
+                # LLM returned empty portfolio, create a fallback
+                _LOGGER.warning("LLM returned empty portfolio, creating fallback allocation")
+                from investment_agent.agent import PortfolioAllocation
+                
+                # Create a simple equal allocation for the first 5 companies
+                companies_to_allocate = state.research_results[:5]
+                allocation_per_company = 100.0 / len(companies_to_allocate)
+                
+                fallback_companies = [
                     {
-                        "company_name": company.company_name,
-                        "allocation_percentage": company.allocation_percentage,
-                        "holding_period": company.holding_period,
+                        "company_name": company["name"],
+                        "allocation_percentage": allocation_per_company,
+                        "holding_period": "6-12 months",
                     }
-                    for company in portfolio.companies
-                ],
-                "total_allocation": portfolio.total_allocation,
-            }
-            return state
-        _LOGGER.debug(
-            "Retrying LLM call. Attempt %d of %d", count + 1, _MAX_LLM_RETRIES
-        )
+                    for company in companies_to_allocate
+                ]
+                
+                state.portfolio_plan = {
+                    "companies": fallback_companies,
+                    "total_allocation": 100.0,
+                }
+                _LOGGER.info(f"Step 2 fallback portfolio plan created: {state.portfolio_plan}")
+                return state
+                
+        except Exception as e:
+            _LOGGER.warning(f"LLM call failed (attempt {count + 1}): {e}")
+            if count == _MAX_LLM_RETRIES - 1:
+                # Last attempt failed, create fallback
+                _LOGGER.warning("All LLM attempts failed, creating fallback allocation")
+                from investment_agent.agent import PortfolioAllocation
+                
+                # Create a simple equal allocation for the first 5 companies
+                companies_to_allocate = state.research_results[:5]
+                allocation_per_company = 100.0 / len(companies_to_allocate)
+                
+                fallback_companies = [
+                    {
+                        "company_name": company["name"],
+                        "allocation_percentage": allocation_per_company,
+                        "holding_period": "6-12 months",
+                    }
+                    for company in companies_to_allocate
+                ]
+                
+                state.portfolio_plan = {
+                    "companies": fallback_companies,
+                    "total_allocation": 100.0,
+                }
+                _LOGGER.info(f"Step 2 emergency fallback portfolio plan created: {state.portfolio_plan}")
+                return state
     
     raise RuntimeError("Failed to build portfolio plan after %d attempts.", _MAX_LLM_RETRIES)
 

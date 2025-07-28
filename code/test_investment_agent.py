@@ -47,7 +47,10 @@ async def test_investment_agent():
     
     try:
         # Mock the search function to avoid API calls
-        with patch('investment_agent.tools.search_companies') as mock_search:
+        with patch('investment_agent.tools.search_companies') as mock_search, \
+             patch('investment_agent.agent.llm') as mock_llm:
+            
+            # Mock search results
             mock_search.return_value = """
 Search Results for: top companies Big tech industry investment potential 1 year
 
@@ -63,6 +66,48 @@ Fallback Company Data:
 - JPMorgan Chase & Co. (JPM): Leading financial services institution
 - Johnson & Johnson (JNJ): Healthcare and pharmaceutical conglomerate
             """
+            
+            # Mock LLM responses
+            from investment_agent.agent import CompanyResearchList, CompanyResearch, PortfolioPlan, PortfolioAllocation
+            
+            # Mock Step 1 response
+            mock_companies = CompanyResearchList(companies=[
+                CompanyResearch(name="Apple Inc.", risk_factor="Low", explanation="Stable tech giant"),
+                CompanyResearch(name="Microsoft Corporation", risk_factor="Low", explanation="Cloud leader"),
+                CompanyResearch(name="NVIDIA Corporation", risk_factor="Medium", explanation="AI growth"),
+            ])
+            
+            # Mock Step 2 response
+            mock_portfolio = PortfolioPlan(
+                companies=[
+                    PortfolioAllocation(company_name="Apple Inc.", allocation_percentage=40.0),
+                    PortfolioAllocation(company_name="Microsoft Corporation", allocation_percentage=35.0),
+                    PortfolioAllocation(company_name="NVIDIA Corporation", allocation_percentage=25.0),
+                ],
+                total_allocation=100.0
+            )
+            
+            # Mock LLM calls for different steps
+            mock_structured_llm_step1 = AsyncMock()
+            mock_structured_llm_step1.ainvoke.return_value = mock_companies
+            
+            mock_structured_llm_step2 = AsyncMock()
+            mock_structured_llm_step2.ainvoke.return_value = mock_portfolio
+            
+            # Configure the mock to return different responses based on the model type
+            def mock_with_structured_output(model_type):
+                if model_type == CompanyResearchList:
+                    return mock_structured_llm_step1
+                elif model_type == PortfolioPlan:
+                    return mock_structured_llm_step2
+                else:
+                    return mock_structured_llm_step1
+            
+            mock_llm.with_structured_output.side_effect = mock_with_structured_output
+            
+            mock_response = AsyncMock()
+            mock_response.content = "Mock investment rationale and plan content"
+            mock_llm.ainvoke = AsyncMock(return_value=mock_response)
             
             # Execute the investment planning workflow
             result = await graph.ainvoke(state)

@@ -11,8 +11,8 @@ import logging
 from dotenv import load_dotenv
 
 # Load environment variables
-load_dotenv("../variables.env")
-load_dotenv("../secrets.env")
+load_dotenv("variables.env")
+load_dotenv("secrets.env")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -29,8 +29,8 @@ async def main():
     print("=" * 50)
     
     # Investment Profile
-    risk_level = "Medium"  # Low, Medium, or High
-    industry = "Big tech"  # Optional: specific industry focus
+    risk_level = "High"  # Low, Medium, or High
+    industry = "Healthcare"  # Optional: specific industry focus
     investment_amount = 100000.0  # Amount to invest in dollars
     time_horizon = "1 year"  # Investment time horizon
     
@@ -60,7 +60,7 @@ async def main():
         print("📊 PORTFOLIO SUMMARY")
         print("=" * 50)
         
-        if result.portfolio_plan:
+        if hasattr(result, 'portfolio_plan') and result.portfolio_plan:
             print("Portfolio Allocation:")
             print("-" * 50)
             for company in result.portfolio_plan["companies"]:
@@ -74,7 +74,7 @@ async def main():
         print("🔍 RESEARCH RESULTS")
         print("=" * 50)
         
-        if result.research_results:
+        if hasattr(result, 'research_results') and result.research_results:
             for i, company in enumerate(result.research_results, 1):
                 print(f"{i}. {company['name']}")
                 print(f"   Risk: {company['risk_factor']}")
@@ -85,7 +85,7 @@ async def main():
         print("📋 FINAL INVESTMENT PLAN")
         print("=" * 50)
         
-        if result.investment_plan:
+        if hasattr(result, 'investment_plan') and result.investment_plan:
             print(result.investment_plan)
         else:
             print("No investment plan generated.")
