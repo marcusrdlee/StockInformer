@@ -60,22 +60,27 @@ async def main():
         print("📊 PORTFOLIO SUMMARY")
         print("=" * 50)
         
-        if hasattr(result, 'portfolio_plan') and result.portfolio_plan:
+        # Handle both Pydantic models and dictionaries
+        portfolio_plan = result.get('portfolio_plan') if isinstance(result, dict) else getattr(result, 'portfolio_plan', None)
+        research_results = result.get('research_results') if isinstance(result, dict) else getattr(result, 'research_results', None)
+        investment_plan = result.get('investment_plan') if isinstance(result, dict) else getattr(result, 'investment_plan', None)
+        
+        if portfolio_plan:
             print("Portfolio Allocation:")
             print("-" * 50)
-            for company in result.portfolio_plan["companies"]:
+            for company in portfolio_plan["companies"]:
                 allocation = company["allocation_percentage"]
                 amount = (allocation / 100) * investment_amount
                 print(f"{company['company_name']:<25} {allocation:>6.1f}% ${amount:>10,.2f}")
             print("-" * 50)
-            print(f"Total Allocation: {result.portfolio_plan['total_allocation']:.1f}%")
+            print(f"Total Allocation: {portfolio_plan['total_allocation']:.1f}%")
         
         print("\n" + "=" * 50)
         print("🔍 RESEARCH RESULTS")
         print("=" * 50)
         
-        if hasattr(result, 'research_results') and result.research_results:
-            for i, company in enumerate(result.research_results, 1):
+        if research_results:
+            for i, company in enumerate(research_results, 1):
                 print(f"{i}. {company['name']}")
                 print(f"   Risk: {company['risk_factor']}")
                 print(f"   Reason: {company['explanation']}")
@@ -85,8 +90,8 @@ async def main():
         print("📋 FINAL INVESTMENT PLAN")
         print("=" * 50)
         
-        if hasattr(result, 'investment_plan') and result.investment_plan:
-            print(result.investment_plan)
+        if investment_plan:
+            print(investment_plan)
         else:
             print("No investment plan generated.")
             
