@@ -1,12 +1,10 @@
 """Main entry point for the investment planning workflow."""
 
-import asyncio
 from typing import Any
-
 from .agent import InvestmentAgentState, graph
 
 
-async def async_create_investment_plan(
+async def create_investment_plan(
     risk_level: str,
     industry: str | None,
     investment_amount: float,
@@ -21,17 +19,3 @@ async def async_create_investment_plan(
     )
     result = await graph.ainvoke(state)
     return result
-
-
-def create_investment_plan(
-    risk_level: str,
-    industry: str | None,
-    investment_amount: float,
-    time_horizon: str,
-) -> Any | dict[str, Any] | None:
-    """Create a personalized investment plan."""
-    return asyncio.run(
-        async_create_investment_plan(
-            risk_level, industry, investment_amount, time_horizon
-        )
-    ) 
