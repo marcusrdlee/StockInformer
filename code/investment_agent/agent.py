@@ -23,7 +23,15 @@ from .prompts import (
 _LOGGER = logging.getLogger(__name__)
 _MAX_LLM_RETRIES = 3
 
-llm = ChatNVIDIA(model="meta/llama-3.3-70b-instruct", temperature=0)
+
+def _get_llm():
+    """Get the LLM instance, creating it if needed."""
+    import os
+
+    api_key = os.getenv("NVIDIA_API_KEY")
+    return ChatNVIDIA(
+        model="meta/llama-3.3-70b-instruct", temperature=0, api_key=api_key
+    )
 
 
 class CompanyResearch(BaseModel):
@@ -59,69 +67,102 @@ class InvestmentAgentState(BaseModel):
     messages: Annotated[Sequence[Any], add_messages] = []
 
 
-async def step_1_research_companies(state: InvestmentAgentState, config: RunnableConfig):
+async def step_1_research_companies(
+    state: InvestmentAgentState, config: RunnableConfig
+):
     """Step 1: Research companies in the selected industry."""
     _LOGGER.info("Step 1: Researching companies for investment planning.")
 
     # Use SerpAPI to search for companies
-    search_query = f"top companies {state.industry or 'technology'} industry investment potential {state.time_horizon}"
-    
+    industry = state.industry or "technology"
+    search_query = f"best {industry} stocks to invest 2025 top companies"
+
     search_results = await tools.search_companies(search_query)
-    
+
     # Process results with LLM to extract structured company data
-    model = llm.with_structured_output(CompanyResearchList)
-    
+    model = _get_llm().with_structured_output(CompanyResearchList)
+
     system_prompt = company_research_prompt.format(
         industry=state.industry or "technology",
         risk_level=state.risk_level,
         time_horizon=state.time_horizon,
         search_results=search_results,
     )
-    
-    for count in range(_MAX_LLM_RETRIES):
-        messages = [{"role": "system", "content": system_prompt}]
-        response = await model.ainvoke(messages, config)
-        if response:
-            company_list = cast(CompanyResearchList, response)
-            research_results = [
-                {
-                    "name": company.name,
-                    "risk_factor": company.risk_factor,
-                    "explanation": company.explanation,
-                }
-                for company in company_list.companies
-            ]
-            state.research_results = research_results
-            return state
-        _LOGGER.debug(
-            "Retrying LLM call. Attempt %d of %d", count + 1, _MAX_LLM_RETRIES
-        )
-    
-    raise RuntimeError("Failed to process company research after %d attempts.", _MAX_LLM_RETRIES)
 
-
-async def step_2_build_portfolio(state: InvestmentAgentState, config: RunnableConfig):
-    """Step 2: Build portfolio plan based on research results."""
-    _LOGGER.info("Step 2: Building portfolio plan.")
-    
-    if not state.research_results:
-        raise ValueError("Research results are required for portfolio planning.")
-    
-    model = llm.with_structured_output(PortfolioPlan)
-    
-    system_prompt = portfolio_planning_prompt.format(
-        companies=state.research_results,
-        risk_level=state.risk_level,
-        investment_amount=state.investment_amount,
-        time_horizon=state.time_horizon,
-    )
-    
     for count in range(_MAX_LLM_RETRIES):
         try:
             messages = [{"role": "system", "content": system_prompt}]
             response = await model.ainvoke(messages, config)
-            
-            if response and hasattr(response, 'companies') and len(response.companies) > 0:
+
+            # Process the response
+            if (
+                response
+                and hasattr(response, "companies")
+                and len(response.companies) > 0
+            ):
+                state.research_results = [
+                    {
+                        "name": company.name,
+                        "risk_factor": company.risk_factor,
+                        "explanation": company.explanation,
+                    }
+                    for company in response.companies
+                ]
+                _LOGGER.info(
+                    f"Step 1 research completed: {len(state.research_results)} companies found"
+                )
+                return state
+            else:
+                _LOGGER.warning(f"LLM returned no companies (attempt {count + 1})")
+
+        except Exception as e:
+            _LOGGER.warning(f"LLM call failed (attempt {count + 1}): {e}")
+            if count == _MAX_LLM_RETRIES - 1:
+                # This was the last attempt
+                _LOGGER.error(
+                    "All LLM attempts failed in step_1_research_companies. No fallback data will be provided."
+                )
+
+    raise RuntimeError(
+        "Failed to process company research after %d attempts.", _MAX_LLM_RETRIES
+    )
+
+
+async def step_2_build_portfolio(state: InvestmentAgentState, config: RunnableConfig):
+    """Step 2: Build investment portfolio plan."""
+    _LOGGER.info("Step 2: Building portfolio plan.")
+
+    if not state.research_results:
+        raise RuntimeError("No research results available for portfolio planning")
+
+    # Create structured output model for portfolio planning
+    model = _get_llm().with_structured_output(PortfolioPlan)
+
+    # Build system prompt with research results
+    company_details = "\n".join(
+        [
+            f"- {company['name']}: {company['explanation']} (Risk: {company['risk_factor']})"
+            for company in state.research_results
+        ]
+    )
+
+    system_prompt = portfolio_planning_prompt.format(
+        companies=company_details,
+        risk_level=state.risk_level,
+        investment_amount=state.investment_amount,
+        time_horizon=state.time_horizon,
+    )
+
+    for count in range(_MAX_LLM_RETRIES):
+        try:
+            messages = [{"role": "system", "content": system_prompt}]
+            response = await model.ainvoke(messages, config)
+
+            if (
+                response
+                and hasattr(response, "companies")
+                and len(response.companies) > 0
+            ):
                 portfolio = cast(PortfolioPlan, response)
                 state.portfolio_plan = {
                     "companies": [
@@ -134,16 +175,22 @@ async def step_2_build_portfolio(state: InvestmentAgentState, config: RunnableCo
                     ],
                     "total_allocation": portfolio.total_allocation,
                 }
+                _LOGGER.info(f"Step 2 portfolio plan created: {state.portfolio_plan}")
                 return state
-            elif response and hasattr(response, 'companies') and len(response.companies) == 0:
+            elif (
+                response
+                and hasattr(response, "companies")
+                and len(response.companies) == 0
+            ):
                 # LLM returned empty portfolio, create a fallback
-                _LOGGER.warning("LLM returned empty portfolio, creating fallback allocation")
+                _LOGGER.warning(
+                    "LLM returned empty portfolio, creating fallback allocation"
+                )
                 from investment_agent.agent import PortfolioAllocation
-                
-                # Create a simple equal allocation for the first 5 companies
+
                 companies_to_allocate = state.research_results[:5]
                 allocation_per_company = 100.0 / len(companies_to_allocate)
-                
+
                 fallback_companies = [
                     {
                         "company_name": company["name"],
@@ -152,25 +199,25 @@ async def step_2_build_portfolio(state: InvestmentAgentState, config: RunnableCo
                     }
                     for company in companies_to_allocate
                 ]
-                
+
                 state.portfolio_plan = {
                     "companies": fallback_companies,
                     "total_allocation": 100.0,
                 }
-                _LOGGER.info(f"Step 2 fallback portfolio plan created: {state.portfolio_plan}")
+                _LOGGER.info(
+                    f"Step 2 fallback portfolio plan created: {state.portfolio_plan}"
+                )
                 return state
-                
+
         except Exception as e:
             _LOGGER.warning(f"LLM call failed (attempt {count + 1}): {e}")
             if count == _MAX_LLM_RETRIES - 1:
-                # Last attempt failed, create fallback
+                # Last attempt failed, create fallback portfolio
                 _LOGGER.warning("All LLM attempts failed, creating fallback allocation")
-                from investment_agent.agent import PortfolioAllocation
-                
-                # Create a simple equal allocation for the first 5 companies
+
                 companies_to_allocate = state.research_results[:5]
                 allocation_per_company = 100.0 / len(companies_to_allocate)
-                
+
                 fallback_companies = [
                     {
                         "company_name": company["name"],
@@ -179,171 +226,207 @@ async def step_2_build_portfolio(state: InvestmentAgentState, config: RunnableCo
                     }
                     for company in companies_to_allocate
                 ]
-                
+
                 state.portfolio_plan = {
                     "companies": fallback_companies,
                     "total_allocation": 100.0,
                 }
-                _LOGGER.info(f"Step 2 emergency fallback portfolio plan created: {state.portfolio_plan}")
+                _LOGGER.info(
+                    f"Step 2 emergency fallback portfolio plan created: {state.portfolio_plan}"
+                )
                 return state
-    
-    raise RuntimeError("Failed to build portfolio plan after %d attempts.", _MAX_LLM_RETRIES)
+
+    raise RuntimeError(
+        "Failed to build portfolio plan after %d attempts.", _MAX_LLM_RETRIES
+    )
 
 
-async def step_3_generate_rationale(state: InvestmentAgentState, config: RunnableConfig):
+async def step_3_generate_rationale(
+    state: InvestmentAgentState, config: RunnableConfig
+):
     """Step 3: Generate investment rationale for each selected company."""
     _LOGGER.info("Step 3: Generating investment rationale.")
-    
-    if not state.portfolio_plan or not state.research_results:
-        raise ValueError("Portfolio plan and research results are required.")
-    
+
+    if not state.portfolio_plan:
+        raise RuntimeError("No portfolio plan available for rationale generation")
+
+    # Build system prompt with portfolio and research data
+    portfolio_details = "\n".join(
+        [
+            f"- {company['company_name']}: {company['allocation_percentage']}% allocation"
+            for company in state.portfolio_plan["companies"]
+        ]
+    )
+
+    research_details = "\n".join(
+        [
+            f"- {company['name']}: {company['explanation']} (Risk: {company['risk_factor']})"
+            for company in state.research_results or []
+        ]
+    )
+
     system_prompt = investment_rationale_prompt.format(
-        portfolio_plan=state.portfolio_plan,
-        research_results=state.research_results,
+        portfolio_plan=portfolio_details,
+        research_results=research_details,
         risk_level=state.risk_level,
         industry=state.industry or "technology",
         time_horizon=state.time_horizon,
     )
-    
+
     for count in range(_MAX_LLM_RETRIES):
         try:
             messages = [{"role": "system", "content": system_prompt}]
-            response = await llm.ainvoke(messages, config)
+            response = await _get_llm().ainvoke(messages, config)
+
             if response and response.content:
                 state.investment_rationale = response.content
+                _LOGGER.info("Step 3 investment rationale generated successfully")
                 return state
+
         except Exception as e:
-            _LOGGER.warning(f"Step 3 LLM call failed (attempt {count + 1}): {e}")
+            _LOGGER.warning(f"LLM call failed (attempt {count + 1}): {e}")
             if count == _MAX_LLM_RETRIES - 1:
                 # Last attempt failed, create fallback rationale
-                _LOGGER.warning("All Step 3 LLM attempts failed, creating fallback rationale")
-                
+                _LOGGER.warning(
+                    "All Step 3 LLM attempts failed, creating fallback rationale"
+                )
+
                 fallback_rationale = f"""
-# Investment Rationale for {state.risk_level} Risk Portfolio
+## Investment Rationale
 
-## Portfolio Overview
-This portfolio is designed for a {state.risk_level} risk investor with a {state.time_horizon} time horizon, focusing on the {state.industry or 'technology'} industry.
-
-## Company Analysis
+Based on our analysis, we have selected the following companies for your {state.risk_level.lower()}-risk investment portfolio of ${state.investment_amount:,.2f} over a {state.time_horizon} timeframe:
 
 """
-                
+
                 for company in state.portfolio_plan["companies"]:
                     company_name = company["company_name"]
                     allocation = company["allocation_percentage"]
-                    
+
                     # Find the research data for this company
-                    research_data = next((c for c in state.research_results if c["name"] == company_name), None)
-                    
+                    research_data = next(
+                        (
+                            c
+                            for c in state.research_results
+                            if c["name"] == company_name
+                        ),
+                        None,
+                    )
+
                     if research_data:
                         fallback_rationale += f"""
 ### {company_name} ({allocation}% allocation)
-- **Risk Level**: {research_data['risk_factor']}
-- **Investment Thesis**: {research_data['explanation']}
-- **Allocation Rationale**: {allocation}% allocation reflects the company's position in the portfolio based on risk-return profile and market position.
-- **Holding Period**: {company.get('holding_period', '6-12 months')}
+{research_data['explanation']}
 
 """
-                    else:
-                        fallback_rationale += f"""
-### {company_name} ({allocation}% allocation)
-- **Allocation Rationale**: {allocation}% allocation reflects the company's position in the portfolio.
-- **Holding Period**: {company.get('holding_period', '6-12 months')}
 
-"""
-                
-                fallback_rationale += f"""
-## Portfolio Strategy
-This {state.risk_level} risk portfolio is designed to balance growth potential with risk management over a {state.time_horizon} time horizon. The allocation strategy considers market position, competitive advantages, and growth potential within the {state.industry or 'technology'} sector.
-"""
-                
-                state.investment_rationale = fallback_rationale
+                state.investment_rationale = fallback_rationale.strip()
+                _LOGGER.info("Step 3 fallback rationale created")
                 return state
-    
-    raise RuntimeError("Failed to generate investment rationale after %d attempts.", _MAX_LLM_RETRIES)
+
+    raise RuntimeError(
+        "Failed to generate investment rationale after %d attempts.", _MAX_LLM_RETRIES
+    )
 
 
-async def step_4_format_final_report(state: InvestmentAgentState, config: RunnableConfig):
+async def step_4_format_final_report(
+    state: InvestmentAgentState, config: RunnableConfig
+):
     """Step 4: Format the final investment plan report."""
     _LOGGER.info("Step 4: Formatting final investment plan report.")
-    
+
     if not state.portfolio_plan or not state.investment_rationale:
-        raise ValueError("Portfolio plan and investment rationale are required.")
-    
+        raise RuntimeError(
+            "Missing portfolio plan or investment rationale for final report"
+        )
+
+    # Build system prompt with all accumulated data
+    portfolio_summary = (
+        f"Total allocation: {state.portfolio_plan['total_allocation']}%\n"
+    )
+    portfolio_summary += "\n".join(
+        [
+            f"- {company['company_name']}: {company['allocation_percentage']}% "
+            f"(${(company['allocation_percentage'] / 100) * state.investment_amount:,.2f})"
+            for company in state.portfolio_plan["companies"]
+        ]
+    )
+
     system_prompt = final_report_prompt.format(
-        portfolio_plan=state.portfolio_plan,
-        investment_rationale=state.investment_rationale,
         risk_level=state.risk_level,
         industry=state.industry or "technology",
         investment_amount=state.investment_amount,
         time_horizon=state.time_horizon,
+        portfolio_plan=portfolio_summary,
+        investment_rationale=state.investment_rationale,
     )
-    
+
     for count in range(_MAX_LLM_RETRIES):
         try:
             messages = [{"role": "system", "content": system_prompt}]
-            response = await llm.ainvoke(messages, config)
+            response = await _get_llm().ainvoke(messages, config)
+
             if response and response.content:
                 state.investment_plan = response.content
+                _LOGGER.info("Step 4 final investment plan report generated")
                 return state
+
         except Exception as e:
-            _LOGGER.warning(f"Step 4 LLM call failed (attempt {count + 1}): {e}")
+            _LOGGER.warning(f"LLM call failed (attempt {count + 1}): {e}")
             if count == _MAX_LLM_RETRIES - 1:
                 # Last attempt failed, create fallback report
-                _LOGGER.warning("All Step 4 LLM attempts failed, creating fallback report")
-                
+                _LOGGER.warning(
+                    "All Step 4 LLM attempts failed, creating fallback report"
+                )
+
                 fallback_report = f"""
-# Personalized Investment Plan Report
+# Personalized Investment Plan
 
 ## Executive Summary
-This investment plan is designed for a {state.risk_level} risk investor with a {state.time_horizon} time horizon, focusing on the {state.industry or 'technology'} industry. The portfolio is allocated across {len(state.portfolio_plan['companies'])} carefully selected companies to optimize risk-adjusted returns.
+This investment plan has been created for a {state.risk_level.lower()}-risk investor with ${state.investment_amount:,.2f} to invest over a {state.time_horizon} timeframe.
 
-## Portfolio Allocation Table
+## Portfolio Allocation
 
 | Company | Allocation | Amount | Holding Period | Risk Level |
 |---------|------------|--------|----------------|------------|
 """
-                
+
                 for company in state.portfolio_plan["companies"]:
                     company_name = company["company_name"]
                     allocation = company["allocation_percentage"]
                     amount = (allocation / 100) * state.investment_amount
-                    holding_period = company.get('holding_period', '6-12 months')
-                    
+                    holding_period = company.get("holding_period", "6-12 months")
+
                     # Find the research data for this company
-                    research_data = next((c for c in state.research_results if c["name"] == company_name), None)
-                    risk_level = research_data['risk_factor'] if research_data else 'Medium'
-                    
+                    research_data = next(
+                        (
+                            c
+                            for c in state.research_results
+                            if c["name"] == company_name
+                        ),
+                        None,
+                    )
+                    risk_level = (
+                        research_data["risk_factor"] if research_data else "Medium"
+                    )
+
                     fallback_report += f"| {company_name} | {allocation}% | ${amount:,.2f} | {holding_period} | {risk_level} |\n"
-                
+
                 fallback_report += f"""
-**Total Investment**: ${state.investment_amount:,.2f}
-**Total Allocation**: {state.portfolio_plan['total_allocation']}%
 
-## Detailed Investment Analysis
-
+## Investment Rationale
 {state.investment_rationale}
 
-## Risk Management Strategy
-- **Diversification**: Portfolio is spread across multiple companies to reduce concentration risk
-- **Risk Alignment**: Allocations are designed to match the {state.risk_level} risk profile
-- **Time Horizon**: Investment strategy is optimized for {state.time_horizon} holding period
-- **Industry Focus**: Concentrated in {state.industry or 'technology'} sector for targeted exposure
-
-## Recommendations
-1. **Regular Review**: Monitor portfolio performance quarterly
-2. **Rebalancing**: Consider rebalancing if allocations drift significantly
-3. **Risk Monitoring**: Stay informed about industry-specific risks
-4. **Exit Strategy**: Plan exit strategies based on the specified holding periods
-
----
-*This report was generated by the StockInformer AI Investment Planning Agent*
+## Risk Considerations
+This portfolio is designed for {state.risk_level.lower()}-risk tolerance and should be reviewed regularly.
 """
-                
-                state.investment_plan = fallback_report
+
+                state.investment_plan = fallback_report.strip()
+                _LOGGER.info("Step 4 fallback report created")
                 return state
-    
-    raise RuntimeError("Failed to format final report after %d attempts.", _MAX_LLM_RETRIES)
+
+    raise RuntimeError(
+        "Failed to format final report after %d attempts.", _MAX_LLM_RETRIES
+    )
 
 
 # Build the workflow graph
@@ -360,4 +443,4 @@ workflow.add_edge("step_2_build_portfolio", "step_3_generate_rationale")
 workflow.add_edge("step_3_generate_rationale", "step_4_format_final_report")
 workflow.add_edge("step_4_format_final_report", END)
 
-graph = workflow.compile() 
+graph = workflow.compile()

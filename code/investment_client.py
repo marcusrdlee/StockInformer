@@ -5,6 +5,11 @@ Investment Planning Agent Client
 This script demonstrates the personalized investment planning agent that creates
 customized investment portfolios based on user preferences.
 """
+# Import the investment agent and terminal helper
+
+from investment_agent import InvestmentAgentState, graph
+from terminal_helper import get_user_investment_profile
+
 
 import asyncio
 import logging
@@ -17,10 +22,6 @@ load_dotenv("secrets.env")
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-# Import the investment agent and terminal helper
-from investment_agent import InvestmentAgentState, graph
-from terminal_helper import get_user_investment_profile
 
 
 async def main():
